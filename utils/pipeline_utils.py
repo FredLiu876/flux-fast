@@ -1,4 +1,5 @@
 import os
+import time
 import pathlib
 import torch
 from diffusers import DiffusionPipeline
@@ -11,187 +12,187 @@ def is_hip():
     return torch.version.hip is not None
 
 
-@torch.library.custom_op("flash::flash_attn_func", mutates_args=())
-def flash_attn_func(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    softmax_scale: Optional[float] =None,
-    causal: bool = False,
-    # probably wrong type for these 4
-    qv: Optional[float] = None,
-    q_descale: Optional[float] = None,
-    k_descale: Optional[float] = None,
-    v_descale: Optional[float] = None,
-    window_size: Optional[List[int]] = None,
-    sink_token_length: int = 0,
-    softcap: float = 0.0,
-    num_splits: int = 1,
-    # probably wrong type for this too
-    pack_gqa: Optional[float] = None,
-    deterministic: bool = False,
-    sm_margin: int = 0,
-) -> torch.Tensor: #Tuple[torch.Tensor, torch.Tensor]:
-    if window_size is None:
-        window_size = (-1, -1)
-    else:
-        window_size = tuple(window_size)
+# @torch.library.custom_op("flash::flash_attn_func", mutates_args=())
+# def flash_attn_func(
+#     q: torch.Tensor,
+#     k: torch.Tensor,
+#     v: torch.Tensor,
+#     softmax_scale: Optional[float] =None,
+#     causal: bool = False,
+#     # probably wrong type for these 4
+#     qv: Optional[float] = None,
+#     q_descale: Optional[float] = None,
+#     k_descale: Optional[float] = None,
+#     v_descale: Optional[float] = None,
+#     window_size: Optional[List[int]] = None,
+#     sink_token_length: int = 0,
+#     softcap: float = 0.0,
+#     num_splits: int = 1,
+#     # probably wrong type for this too
+#     pack_gqa: Optional[float] = None,
+#     deterministic: bool = False,
+#     sm_margin: int = 0,
+# ) -> torch.Tensor: #Tuple[torch.Tensor, torch.Tensor]:
+#     if window_size is None:
+#         window_size = (-1, -1)
+#     else:
+#         window_size = tuple(window_size)
 
-    if is_hip():
-        from aiter.ops.triton.mha import flash_attn_fp8_func as flash_attn_interface_func
-    else:
-        from flash_attn.flash_attn_interface import flash_attn_interface_func
+#     if is_hip():
+#         from aiter.ops.triton.mha import flash_attn_fp8_func as flash_attn_interface_func
+#     else:
+#         from flash_attn.flash_attn_interface import flash_attn_interface_func
 
-    sig = inspect.signature(flash_attn_interface_func)
-    accepted = set(sig.parameters)
-    all_kwargs = {
-        "softmax_scale": softmax_scale,
-        "causal": causal,
-        "qv": qv,
-        "q_descale": q_descale,
-        "k_descale": k_descale,
-        "v_descale": v_descale,
-        "window_size": window_size,
-        "sink_token_length": sink_token_length,
-        "softcap": softcap,
-        "num_splits": num_splits,
-        "pack_gqa": pack_gqa,
-        "deterministic": deterministic,
-        "sm_margin": sm_margin,
-    }
-    kwargs = {k: v for k, v in all_kwargs.items() if k in accepted}
+#     sig = inspect.signature(flash_attn_interface_func)
+#     accepted = set(sig.parameters)
+#     all_kwargs = {
+#         "softmax_scale": softmax_scale,
+#         "causal": causal,
+#         "qv": qv,
+#         "q_descale": q_descale,
+#         "k_descale": k_descale,
+#         "v_descale": v_descale,
+#         "window_size": window_size,
+#         "sink_token_length": sink_token_length,
+#         "softcap": softcap,
+#         "num_splits": num_splits,
+#         "pack_gqa": pack_gqa,
+#         "deterministic": deterministic,
+#         "sm_margin": sm_margin,
+#     }
+#     kwargs = {k: v for k, v in all_kwargs.items() if k in accepted}
 
-    if is_hip():
-        # For AMD, AITER fp8 kernels take in fp32 inputs and converts it to fp8 by itself
-        # So we don't need to convert to fp8 here
-        outputs = flash_attn_interface_func(
-            q, k, v, **kwargs,
-        )
-    else:
-        dtype = torch.float8_e4m3fn
-        outputs = flash_attn_interface_func(
-            q.to(dtype), k.to(dtype), v.to(dtype), **kwargs,
-        )[0]
+#     if is_hip():
+#         # For AMD, AITER fp8 kernels take in fp32 inputs and converts it to fp8 by itself
+#         # So we don't need to convert to fp8 here
+#         outputs = flash_attn_interface_func(
+#             q, k, v, **kwargs,
+#         )
+#     else:
+#         dtype = torch.float8_e4m3fn
+#         outputs = flash_attn_interface_func(
+#             q.to(dtype), k.to(dtype), v.to(dtype), **kwargs,
+#         )[0]
 
-    return outputs.contiguous().to(torch.bfloat16) if is_hip() else outputs
+#     return outputs.contiguous().to(torch.bfloat16) if is_hip() else outputs
 
-@flash_attn_func.register_fake
-def _(q, k, v, **kwargs):
-    # two outputs:
-    # 1. output: (batch, seq_len, num_heads, head_dim)
-    # 2. softmax_lse: (batch, num_heads, seq_len) with dtype=torch.float32
-    meta_q = torch.empty_like(q).contiguous()
-    return meta_q #, q.new_empty((q.size(0), q.size(2), q.size(1)), dtype=torch.float32)
+# @flash_attn_func.register_fake
+# def _(q, k, v, **kwargs):
+#     # two outputs:
+#     # 1. output: (batch, seq_len, num_heads, head_dim)
+#     # 2. softmax_lse: (batch, num_heads, seq_len) with dtype=torch.float32
+#     meta_q = torch.empty_like(q).contiguous()
+#     return meta_q #, q.new_empty((q.size(0), q.size(2), q.size(1)), dtype=torch.float32)
 
-# Copied FusedFluxAttnProcessor2_0 but using flash v3 instead of SDPA
-class FlashFusedFluxAttnProcessor3_0:
-    """Attention processor used typically in processing the SD3-like self-attention projections."""
+# # Copied FusedFluxAttnProcessor2_0 but using flash v3 instead of SDPA
+# class FlashFusedFluxAttnProcessor3_0:
+#     """Attention processor used typically in processing the SD3-like self-attention projections."""
 
-    def __init__(self):
+#     def __init__(self):
 
-        if is_hip():
-            try:
-                from aiter.ops.triton.mha import flash_attn_fp8_func as flash_attn_interface_func
-            except ImportError:
-                raise ImportError(
-                    "aiter is required to be installed"
-                )
-        else:
-            try:
-                from flash_attn.flash_attn_interface import flash_attn_interface_func
-            except ImportError:
-                raise ImportError(
-                    "flash_attention v3 package is required to be installed"
-                )
+#         if is_hip():
+#             try:
+#                 from aiter.ops.triton.mha import flash_attn_fp8_func as flash_attn_interface_func
+#             except ImportError:
+#                 raise ImportError(
+#                     "aiter is required to be installed"
+#                 )
+#         else:
+#             try:
+#                 from flash_attn.flash_attn_interface import flash_attn_interface_func
+#             except ImportError:
+#                 raise ImportError(
+#                     "flash_attention v3 package is required to be installed"
+#                 )
 
-    def __call__(
-        self,
-        attn,
-        hidden_states: torch.FloatTensor,
-        encoder_hidden_states: torch.FloatTensor = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        image_rotary_emb: Optional[torch.Tensor] = None,
-    ) -> torch.FloatTensor:
-        batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+#     def __call__(
+#         self,
+#         attn,
+#         hidden_states: torch.FloatTensor,
+#         encoder_hidden_states: torch.FloatTensor = None,
+#         attention_mask: Optional[torch.FloatTensor] = None,
+#         image_rotary_emb: Optional[torch.Tensor] = None,
+#     ) -> torch.FloatTensor:
+#         batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
 
-        # `sample` projections.
-        qkv = attn.to_qkv(hidden_states)
-        split_size = qkv.shape[-1] // 3
-        query, key, value = torch.split(qkv, split_size, dim=-1)
+#         # `sample` projections.
+#         qkv = attn.to_qkv(hidden_states)
+#         split_size = qkv.shape[-1] // 3
+#         query, key, value = torch.split(qkv, split_size, dim=-1)
 
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // attn.heads
+#         inner_dim = key.shape[-1]
+#         head_dim = inner_dim // attn.heads
 
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+#         query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+#         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+#         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
-        if attn.norm_q is not None:
-            query = attn.norm_q(query)
-        if attn.norm_k is not None:
-            key = attn.norm_k(key)
+#         if attn.norm_q is not None:
+#             query = attn.norm_q(query)
+#         if attn.norm_k is not None:
+#             key = attn.norm_k(key)
 
-        # the attention in FluxSingleTransformerBlock does not use `encoder_hidden_states`
-        # `context` projections.
-        if encoder_hidden_states is not None:
-            encoder_qkv = attn.to_added_qkv(encoder_hidden_states)
-            split_size = encoder_qkv.shape[-1] // 3
-            (
-                encoder_hidden_states_query_proj,
-                encoder_hidden_states_key_proj,
-                encoder_hidden_states_value_proj,
-            ) = torch.split(encoder_qkv, split_size, dim=-1)
+#         # the attention in FluxSingleTransformerBlock does not use `encoder_hidden_states`
+#         # `context` projections.
+#         if encoder_hidden_states is not None:
+#             encoder_qkv = attn.to_added_qkv(encoder_hidden_states)
+#             split_size = encoder_qkv.shape[-1] // 3
+#             (
+#                 encoder_hidden_states_query_proj,
+#                 encoder_hidden_states_key_proj,
+#                 encoder_hidden_states_value_proj,
+#             ) = torch.split(encoder_qkv, split_size, dim=-1)
 
-            encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            ).transpose(1, 2)
-            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            ).transpose(1, 2)
-            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            ).transpose(1, 2)
+#             encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
+#                 batch_size, -1, attn.heads, head_dim
+#             ).transpose(1, 2)
+#             encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
+#                 batch_size, -1, attn.heads, head_dim
+#             ).transpose(1, 2)
+#             encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
+#                 batch_size, -1, attn.heads, head_dim
+#             ).transpose(1, 2)
 
-            if attn.norm_added_q is not None:
-                encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
-            if attn.norm_added_k is not None:
-                encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
+#             if attn.norm_added_q is not None:
+#                 encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
+#             if attn.norm_added_k is not None:
+#                 encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
 
-            # attention
-            query = torch.cat([encoder_hidden_states_query_proj, query], dim=2)
-            key = torch.cat([encoder_hidden_states_key_proj, key], dim=2)
-            value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
+#             # attention
+#             query = torch.cat([encoder_hidden_states_query_proj, query], dim=2)
+#             key = torch.cat([encoder_hidden_states_key_proj, key], dim=2)
+#             value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
 
-        if image_rotary_emb is not None:
-            from diffusers.models.embeddings import apply_rotary_emb
+#         if image_rotary_emb is not None:
+#             from diffusers.models.embeddings import apply_rotary_emb
 
-            query = apply_rotary_emb(query, image_rotary_emb)
-            key = apply_rotary_emb(key, image_rotary_emb)
+#             query = apply_rotary_emb(query, image_rotary_emb)
+#             key = apply_rotary_emb(key, image_rotary_emb)
 
-        # NB: transposes are necessary to match expected SDPA input shape
-        hidden_states = flash_attn_func(
-            query.transpose(1, 2),
-            key.transpose(1, 2),
-            value.transpose(1, 2))[0].transpose(1, 2)
+#         # NB: transposes are necessary to match expected SDPA input shape
+#         hidden_states = flash_attn_func(
+#             query.transpose(1, 2),
+#             key.transpose(1, 2),
+#             value.transpose(1, 2))[0].transpose(1, 2)
 
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        hidden_states = hidden_states.to(query.dtype)
+#         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+#         hidden_states = hidden_states.to(query.dtype)
 
-        if encoder_hidden_states is not None:
-            encoder_hidden_states, hidden_states = (
-                hidden_states[:, : encoder_hidden_states.shape[1]],
-                hidden_states[:, encoder_hidden_states.shape[1] :],
-            )
+#         if encoder_hidden_states is not None:
+#             encoder_hidden_states, hidden_states = (
+#                 hidden_states[:, : encoder_hidden_states.shape[1]],
+#                 hidden_states[:, encoder_hidden_states.shape[1] :],
+#             )
 
-            # linear proj
-            hidden_states = attn.to_out[0](hidden_states)
-            # dropout
-            hidden_states = attn.to_out[1](hidden_states)
-            encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+#             # linear proj
+#             hidden_states = attn.to_out[0](hidden_states)
+#             # dropout
+#             hidden_states = attn.to_out[1](hidden_states)
+#             encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
 
-            return hidden_states, encoder_hidden_states
-        else:
-            return hidden_states
+#             return hidden_states, encoder_hidden_states
+#         else:
+#             return hidden_states
 
 
 # wrapper to automatically handle CUDAGraph record / replay over the given function
@@ -243,6 +244,16 @@ def use_compile(pipeline):
         pipeline.vae.decode, mode="max-autotune", fullgraph=True, dynamic=True if is_hip() else None
     )
 
+    if os.path.exists('artifact_bytes'):
+        with open('artifact_bytes', 'rb') as f:
+            artifact_bytes = f.read()
+
+        #import torch._dynamo
+        cache_info = torch.compiler.load_cache_artifacts(artifact_bytes)
+        print(cache_info)
+        print("Loaded cache")
+
+    start_time = time.time()
     # warmup for a few iterations (`num_inference_steps` shouldn't matter)
     input_kwargs = {
         "prompt": "dummy prompt to trigger torch compilation", "num_inference_steps": 4
@@ -252,6 +263,15 @@ def use_compile(pipeline):
     for _ in range(3):
         pipeline(**input_kwargs).images[0]
 
+    end_time = time.time()
+    print(f"######## Full compilation time: {end_time - start_time:.6f} seconds")
+    
+    artifacts = torch.compiler.save_cache_artifacts()
+    assert artifacts is not None
+    artifact_bytes, cache_info = artifacts
+    with open('artifact_bytes', 'wb') as f:
+        f.write(artifact_bytes)
+    print(cache_info)
     return pipeline
 
 
@@ -380,9 +400,9 @@ def optimize(pipeline, args):
         pipeline.transformer.fuse_qkv_projections()
         pipeline.vae.fuse_qkv_projections()
 
-    # Use flash attention v3
-    if not args.disable_fa3:
-        pipeline.transformer.set_attn_processor(FlashFusedFluxAttnProcessor3_0())
+    # # Use flash attention v3
+    # if not args.disable_fa3:
+    #     pipeline.transformer.set_attn_processor(FlashFusedFluxAttnProcessor3_0())
 
     # switch memory layout to channels_last
     if not args.disable_channels_last:
@@ -412,6 +432,8 @@ def optimize(pipeline, args):
         # config.max_autotune_gemm_backends = "ATEN,TRITON,CPP,CUTLASS"
 
     if args.compile_export_mode == "compile":
+        pipeline = use_compile(pipeline)
+        torch.compiler.reset()
         pipeline = use_compile(pipeline)
     elif args.compile_export_mode == "export_aoti":
         pipeline = use_export_aoti(
